@@ -9,5 +9,5 @@ edition = "2018"
 ethereum-types = "0.8"
 futures = "0.3"
 log = "0.4"
-parity-secretstore-primitives = { path = "../primitives" }
+parity-secretstore-primitives = { git = "https://github.com/svyatonik/secretstore-primitives.git" }
 parking_lot = "0.10"
