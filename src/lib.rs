@@ -1,3 +1,19 @@
+// Copyright 2015-2020 Parity Technologies (UK) Ltd.
+// This file is part of Parity Secret Store.
+
+// Parity Secret Store is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// Parity Secret Store is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Parity Secret Store.  If not, see <http://www.gnu.org/licenses/>.
+
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -7,31 +23,39 @@ use log::{error, warn};
 use parking_lot::RwLock;
 use ethereum_types::{U256, BigEndianHash};
 
-use parity_secretstore_primitives::{KeyServerId, ServerKey, ServerKeyId, error::Error, key_server::KeyServer, service::ServiceTask, requester::Requester, DocumentKeyCommon, EncryptedDocumentKeyShadow};
+use parity_secretstore_primitives::{
+	KeyServerId, ServerKeyId,
+	error::Error,
+	key_server::{KeyServer, ServerKeyGenerationArtifacts, ServerKeyRetrievalArtifacts, DocumentKeyCommonRetrievalArtifacts, DocumentKeyShadowRetrievalArtifacts},
+	requester::Requester,
+	service::ServiceTask,
+};
 
 /// Blockchain service tasks.
-pub enum BlockchainServiceTask {
+pub enum BlockchainServiceTask<Origin> {
 	/// Regular service task.
-	Regular(ServiceTask),
-	///
-	RetrieveShadowDocumentKeyCommon(ServerKeyId, Requester),
-	///
-	RetrieveShadowDocumentKeyPersonal(ServerKeyId, Requester),
+	Regular(Origin, ServiceTask),
+	/// Retrieve common part of document key.
+	RetrieveShadowDocumentKeyCommon(Origin, ServerKeyId, Requester),
+	/// Retrieve personal part of document key.
+	RetrieveShadowDocumentKeyPersonal(Origin, ServerKeyId, Requester),
 }
 
 /// Block API.
 pub trait Block: Send + Sync {
+	/// Task origin type.
+	type Origin: Send;
 	/// New blocks iterator.
-	type NewBlocksIterator: Iterator<Item = BlockchainServiceTask>;
+	type NewBlocksIterator: Iterator<Item = BlockchainServiceTask<Self::Origin>>;
 	/// Pending tasks iterator.
-	type PendingBlocksIterator: Iterator<Item = BlockchainServiceTask>;
+	type PendingBlocksIterator: Iterator<Item = BlockchainServiceTask<Self::Origin>>;
 
 	/// Get all new service tasks from this block.
-	fn new_tasks(&self) -> Self::NewBlocksIterator;
+	fn new_tasks(&mut self) -> Self::NewBlocksIterator;
 	/// Get all pending service tasks at this block.
-	fn pending_tasks(&self) -> Self::PendingBlocksIterator;
+	fn pending_tasks(&mut self) -> Self::PendingBlocksIterator;
 	/// Returns current key server set at this block.
-	fn current_key_servers_set(&self) -> BTreeSet<KeyServerId>;
+	fn current_key_servers_set(&mut self) -> BTreeSet<KeyServerId>;
 }
 
 /// Futures executor.
@@ -41,30 +65,63 @@ pub trait Executor: Send + Sync + 'static {
 }
 
 /// Transaction pool API.
-pub trait TransactionPool: Send + Sync + 'static {
+pub trait TransactionPool<Origin>: Send + Sync + 'static {
 	/// Publish generated server key.
-	fn publish_generated_server_key(&self, key_id: ServerKeyId, key: ServerKey);
+	fn publish_generated_server_key(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		artifacts: ServerKeyGenerationArtifacts,
+	);
 	/// Publish server key generation error.
-	fn publish_server_key_generation_error(&self, key_id: ServerKeyId);
+	fn publish_server_key_generation_error(&self, origin: Origin, key_id: ServerKeyId);
+	/// Publish retrieved server key.
+	fn publish_retrieved_server_key(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		artifacts: ServerKeyRetrievalArtifacts,
+	);
+	/// Publish server key retrieval error.
+	fn publish_server_key_retrieval_error(&self, origin: Origin, key_id: ServerKeyId);
+	/// Publish store document key result (success).
+	fn publish_stored_document_key(&self, origin: Origin, key_id: ServerKeyId);
+	/// Publish document key store error.
+	fn publish_document_key_store_error(&self, origin: Origin, key_id: ServerKeyId);
+	/// Publish retrieved common part of document key.
+	fn publish_retrieved_document_key_common(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		requester: Requester,
+		artifacts: DocumentKeyCommonRetrievalArtifacts,
+	);
+	/// Publish common part of document key retrieval error.
+	fn publish_document_key_common_retrieval_error(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		requester: Requester,
+	);
+	/// Publish retrieved personal part of document key.
+	fn publish_retrieved_document_key_personal(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		requester: Requester,
+		artifacts: DocumentKeyShadowRetrievalArtifacts,
+	);
 	///
-	fn publish_retrieved_server_key(&self, key_id: ServerKeyId, key: ServerKey);
-	///
-	fn publish_server_key_retrieval_error(&self, key_id: ServerKeyId);
-	///
-	fn publish_stored_document_key(&self, key_id: ServerKeyId);
-	///
-	fn publish_document_key_store_error(&self, key_id: ServerKeyId);
-	///
-	fn publish_retrieved_document_key_common(&self, key_id: ServerKeyId, requester: Requester, key_common: DocumentKeyCommon);
-	///
-	fn publish_document_key_common_retrieval_error(&self, key_id: ServerKeyId, requester: Requester);
-	///
-	fn publish_retrieved_document_key_personal(&self, key_id: ServerKeyId, requester: Requester, key_personal: EncryptedDocumentKeyShadow);
-	///
-	fn publish_document_key_personal_retrieval_error(&self, key_id: ServerKeyId, requester: Requester);
+	fn publish_document_key_personal_retrieval_error(
+		&self,
+		origin: Origin,
+		key_id: ServerKeyId,
+		requester: Requester,
+	);
 }
 
 /// Service configuration.
+#[derive(Clone)]
 pub struct Configuration {
 	/// Id of this key server.
 	pub self_id: KeyServerId,
@@ -97,21 +154,25 @@ struct ServiceData {
 	/// Recently completed (with or without error) server key generation sessions,
 	/// started by this service.
 	pub recent_server_key_generation_sessions: HashSet<ServerKeyId>,
-	///
+	/// Active server key retrieval sessions started by this service.
 	pub server_key_retrieval_sessions: HashSet<ServerKeyId>,
-	///
+	/// Recently completed (with or without error) server key retrieval sessions,
+	/// started by this service.
 	pub recent_server_key_retrieval_sessions: HashSet<ServerKeyId>,
-	///
+	/// Active document key store sessions started by this service.
 	pub document_key_store_sessions: HashSet<ServerKeyId>,
-	///
+	/// Recently completed (with or without error) document key store sessions,
+	/// started by this service.
 	pub recent_document_key_store_sessions: HashSet<ServerKeyId>,
-	///
+	/// Active common document key part retrieval sessions started by this service.
 	pub document_key_common_retrieval_sessions: HashSet<(ServerKeyId, Requester)>,
-	///
+	/// Recently completed (with or without error) common document key part retrieval sessions,
+	/// started by this service.
 	pub recent_document_key_common_retrieval_sessions: HashSet<(ServerKeyId, Requester)>,
-	///
+	/// Active personal document key part retrieval sessions started by this service.
 	pub document_key_personal_retrieval_sessions: HashSet<(ServerKeyId, Requester)>,
-	///
+	/// Recently completed (with or without error) personal document key part retrieval sessions,
+	/// started by this service.
 	pub recent_document_key_personal_retrieval_sessions: HashSet<(ServerKeyId, Requester)>,
 }
 
@@ -125,7 +186,7 @@ pub async fn start_service<B, E, TP, KS>(
 ) -> Result<(), Error> where
 	B: Block,
 	E: Executor,
-	TP: TransactionPool,
+	TP: TransactionPool<B::Origin>,
 	KS: KeyServer,
 {
 	let environment = Arc::new(Environment {
@@ -149,7 +210,7 @@ pub async fn start_service<B, E, TP, KS>(
 	}));
 
 	new_blocks_stream
-		.for_each(|block| {
+		.for_each(|mut block| {
 			// we do not want to overload Secret Store, so let's limit number of possible active sessions
 			let future_service_data = service_data.clone();
 			let mut service_data = service_data.write();
@@ -184,9 +245,13 @@ pub async fn start_service<B, E, TP, KS>(
 						block.pending_tasks().take(max_additional_sessions),
 						&mut service_data,
 					);
-				}
 
-				// TODO: clear recent_*
+					service_data.recent_server_key_generation_sessions.clear();
+					service_data.recent_server_key_retrieval_sessions.clear();
+					service_data.recent_document_key_store_sessions.clear();
+					service_data.recent_document_key_common_retrieval_sessions.clear();
+					service_data.recent_document_key_personal_retrieval_sessions.clear();
+				}
 			}
 
 			ready(())
@@ -196,16 +261,18 @@ pub async fn start_service<B, E, TP, KS>(
 	Ok(())
 }
 
-fn process_tasks<E, TP, KS>(
+/// Process multiple service tasks.
+fn process_tasks<E, TP, KS, Origin>(
 	future_environment: &Arc<Environment<E, TP, KS>>,
 	future_service_data: &Arc<RwLock<ServiceData>>,
 	current_set: &BTreeSet<KeyServerId>,
-	new_tasks: impl Iterator<Item = BlockchainServiceTask>,
+	new_tasks: impl Iterator<Item = BlockchainServiceTask<Origin>>,
 	service_data: &mut ServiceData,
 ) -> usize where
 	E: Executor,
-	TP: TransactionPool,
+	TP: TransactionPool<Origin>,
 	KS: KeyServer,
+	Origin: Send,
 {
 	let mut added_tasks = 0;
 	for new_task in new_tasks {
@@ -227,19 +294,20 @@ fn process_tasks<E, TP, KS>(
 	added_tasks
 }
 
-fn process_task<E, TP, KS>(
+/// Process single service task.
+fn process_task<E, TP, KS, Origin>(
 	future_environment: &Arc<Environment<E, TP, KS>>,
 	future_service_data: &Arc<RwLock<ServiceData>>,
 	current_set: &BTreeSet<KeyServerId>,
-	task: BlockchainServiceTask,
+	task: BlockchainServiceTask<Origin>,
 	service_data: &mut ServiceData,
 ) -> Option<impl Future<Output = ()>> where
 	E: Executor,
-	TP: TransactionPool,
+	TP: TransactionPool<Origin>,
 	KS: KeyServer,
 {
 	match task {
-		BlockchainServiceTask::Regular(ServiceTask::GenerateServerKey(key_id, requester, threshold)) => {
+		BlockchainServiceTask::Regular(origin, ServiceTask::GenerateServerKey(key_id, requester, threshold)) => {
 			if !filter_task(
 				&current_set,
 				&future_environment.self_id,
@@ -260,19 +328,26 @@ fn process_task<E, TP, KS>(
 						future_service_data.write().server_key_generation_sessions.remove(&key_id);
 
 						match result {
-							Ok(key) => future_environment.transaction_pool.publish_generated_server_key(key_id, key),
+							Ok(artifacts) => future_environment.transaction_pool.publish_generated_server_key(
+								origin,
+								key_id,
+								artifacts,
+							),
 							Err(error) if error.is_non_fatal() => {
 								log_nonfatal_secret_store_error(&format!("GenerateServerKey({})", key_id), error);
 							},
 							Err(error) => {
 								log_fatal_secret_store_error(&format!("GenerateServerKey({})", key_id), error);
-								future_environment.transaction_pool.publish_server_key_generation_error(key_id);
-							}
+								future_environment.transaction_pool.publish_server_key_generation_error(
+									origin,
+									key_id,
+								);
+							},
 						}
 					})
 			))
 		},
-		BlockchainServiceTask::Regular(ServiceTask::RetrieveServerKey(key_id, requester)) => {
+		BlockchainServiceTask::Regular(origin, ServiceTask::RetrieveServerKey(key_id, requester)) => {
 			if !filter_task(
 				&current_set,
 				&future_environment.self_id,
@@ -293,19 +368,27 @@ fn process_task<E, TP, KS>(
 						future_service_data.write().server_key_retrieval_sessions.remove(&key_id);
 
 						match result {
-							Ok(key) => future_environment.transaction_pool.publish_retrieved_server_key(key_id, key),
+							Ok(artifacts) => future_environment.transaction_pool.publish_retrieved_server_key(
+								origin,
+								key_id,
+								artifacts,
+							),
 							Err(error) if error.is_non_fatal() => {
 								log_nonfatal_secret_store_error(&format!("RetrieveServerKey({})", key_id), error);
 							},
 							Err(error) => {
 								log_fatal_secret_store_error(&format!("RetrieveServerKey({})", key_id), error);
-								future_environment.transaction_pool.publish_server_key_retrieval_error(key_id);
-							}
+								future_environment.transaction_pool.publish_server_key_retrieval_error(
+									origin,
+									key_id,
+								);
+							},
 						}
 					})
 			)))
 		},
 		BlockchainServiceTask::Regular(
+			origin,
 			ServiceTask::StoreDocumentKey(key_id, requester, common_point, encrypted_point),
 		) => {
 			if !filter_task(
@@ -328,19 +411,25 @@ fn process_task<E, TP, KS>(
 						future_service_data.write().document_key_store_sessions.remove(&key_id);
 
 						match result {
-							Ok(_) => future_environment.transaction_pool.publish_stored_document_key(key_id),
+							Ok(_) => future_environment.transaction_pool.publish_stored_document_key(
+								origin,
+								key_id,
+							),
 							Err(error) if error.is_non_fatal() => {
 								log_nonfatal_secret_store_error(&format!("StoreDocumentKey({})", key_id), error);
 							},
 							Err(error) => {
 								log_fatal_secret_store_error(&format!("StoreDocumentKey({})", key_id), error);
-								future_environment.transaction_pool.publish_document_key_store_error(key_id);
-							}
+								future_environment.transaction_pool.publish_document_key_store_error(
+									origin,
+									key_id,
+								);
+							},
 						}
 					})
 			))))
 		},
-		BlockchainServiceTask::RetrieveShadowDocumentKeyCommon(key_id, requester) => {
+		BlockchainServiceTask::RetrieveShadowDocumentKeyCommon(origin, key_id, requester) => {
 			if !filter_document_task(
 				&current_set,
 				&future_environment.self_id,
@@ -359,14 +448,19 @@ fn process_task<E, TP, KS>(
 					.key_server
 					.restore_document_key_common(key_id, requester.clone())
 					.map(move |result| {
-						future_service_data.write().document_key_common_retrieval_sessions.remove(&(key_id, requester.clone()));
+						future_service_data.write().document_key_common_retrieval_sessions.remove(
+							&(key_id, requester.clone()),
+						);
 
 						match result {
-							Ok(key_common) => future_environment.transaction_pool.publish_retrieved_document_key_common(
-								key_id,
-								requester,
-								key_common,
-							),
+							Ok(artifacts) => future_environment
+								.transaction_pool
+								.publish_retrieved_document_key_common(
+									origin,
+									key_id,
+									requester,
+									artifacts,
+								),
 							Err(error) if error.is_non_fatal() => {
 								log_nonfatal_secret_store_error(
 									&format!("RestoreDocumentKeyCommon({}, {})", key_id, requester),
@@ -378,13 +472,17 @@ fn process_task<E, TP, KS>(
 									&format!("RestoreDocumentKeyCommon({}, {})", key_id, requester),
 									error,
 								);
-								future_environment.transaction_pool.publish_document_key_common_retrieval_error(key_id, requester);
+								future_environment.transaction_pool.publish_document_key_common_retrieval_error(
+									origin,
+									key_id,
+									requester,
+								);
 							}
 						}
 					})
 			)))))
 		},
-		BlockchainServiceTask::RetrieveShadowDocumentKeyPersonal(key_id, requester) => {
+		BlockchainServiceTask::RetrieveShadowDocumentKeyPersonal(origin, key_id, requester) => {
 			if !filter_document_task(
 				&current_set,
 				&future_environment.self_id,
@@ -403,14 +501,19 @@ fn process_task<E, TP, KS>(
 					.key_server
 					.restore_document_key_shadow(key_id, requester.clone())
 					.map(move |result| {
-						future_service_data.write().document_key_personal_retrieval_sessions.remove(&(key_id, requester.clone()));
+						future_service_data.write().document_key_personal_retrieval_sessions.remove(
+							&(key_id, requester.clone()),
+						);
 
 						match result {
-							Ok(key_personal) => future_environment.transaction_pool.publish_retrieved_document_key_personal(
-								key_id,
-								requester,
-								key_personal,
-							),
+							Ok(key_personal) => future_environment
+								.transaction_pool
+								.publish_retrieved_document_key_personal(
+									origin,
+									key_id,
+									requester,
+									key_personal,
+								),
 							Err(error) if error.is_non_fatal() => {
 								log_nonfatal_secret_store_error(
 									&format!("RestoreDocumentKeyPersonal({}, {})", key_id, requester),
@@ -422,33 +525,40 @@ fn process_task<E, TP, KS>(
 									&format!("RestoreDocumentKeyPersonal({}, {})", key_id, requester),
 									error,
 								);
-								future_environment.transaction_pool.publish_document_key_personal_retrieval_error(key_id, requester);
+								future_environment
+									.transaction_pool
+									.publish_document_key_personal_retrieval_error(
+										origin,
+										key_id,
+										requester,
+									);
 							}
 						}
 					})
 			)))))
 		},
-		BlockchainServiceTask::Regular(ServiceTask::GenerateDocumentKey(_, _, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::GenerateDocumentKey(_, _, _)) => {
 			unimplemented!("GenerateDocumentKey requests are not implemented on blockchain services");
 		},
-		BlockchainServiceTask::Regular(ServiceTask::RetrieveDocumentKey(_, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::RetrieveDocumentKey(_, _)) => {
 			unimplemented!("RetrieveDocumentKey requests are not implemented on blockchain services");
 		},
-		BlockchainServiceTask::Regular(ServiceTask::RetrieveShadowDocumentKey(_, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::RetrieveShadowDocumentKey(_, _)) => {
 			unimplemented!("RetrieveShadowDocumentKey requests are not implemented on blockchain services");
 		},
-		BlockchainServiceTask::Regular(ServiceTask::SchnorrSignMessage(_, _, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::SchnorrSignMessage(_, _, _)) => {
 			unimplemented!("SchnorrSignMessage requests are not implemented on blockchain services");
 		},
-		BlockchainServiceTask::Regular(ServiceTask::EcdsaSignMessage(_, _, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::EcdsaSignMessage(_, _, _)) => {
 			unimplemented!("EcdsaSignMessage requests are not implemented on blockchain services");
 		},
-		BlockchainServiceTask::Regular(ServiceTask::ChangeServersSet(_, _, _)) => {
+		BlockchainServiceTask::Regular(_, ServiceTask::ChangeServersSet(_, _, _)) => {
 			unimplemented!("ChangeServersSet requests are not implemented on blockchain services");
 		},
 	}
 }
 
+/// Log nonfatal session error.
 fn log_nonfatal_secret_store_error(request_type: &str, error: Error) {
 	warn!(
 		target: "secretstore",
@@ -458,6 +568,7 @@ fn log_nonfatal_secret_store_error(request_type: &str, error: Error) {
 	);
 }
 
+/// Log fatal session error.
 fn log_fatal_secret_store_error(request_type: &str, error: Error) {
 	error!(
 		target: "secretstore",
@@ -547,5 +658,8 @@ impl ServiceData {
 	fn active_sessions(&self) -> usize {
 		self.server_key_generation_sessions.len()
 			+ self.server_key_retrieval_sessions.len()
+			+ self.document_key_store_sessions.len()
+			+ self.document_key_common_retrieval_sessions.len()
+			+ self.document_key_personal_retrieval_sessions.len()
 	}
 }
