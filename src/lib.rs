@@ -26,13 +26,16 @@ use ethereum_types::{U256, BigEndianHash};
 use parity_secretstore_primitives::{
 	KeyServerId, ServerKeyId,
 	error::Error,
-	key_server::{KeyServer, ServerKeyGenerationArtifacts, ServerKeyRetrievalArtifacts, DocumentKeyCommonRetrievalArtifacts, DocumentKeyShadowRetrievalArtifacts},
+	key_server::{
+		Origin, KeyServer, ServerKeyGenerationArtifacts, ServerKeyRetrievalArtifacts,
+		DocumentKeyCommonRetrievalArtifacts, DocumentKeyShadowRetrievalArtifacts,
+	},
 	requester::Requester,
 	service::ServiceTask,
 };
 
 /// Blockchain service tasks.
-pub enum BlockchainServiceTask<Origin> {
+pub enum BlockchainServiceTask {
 	/// Regular service task.
 	Regular(Origin, ServiceTask),
 	/// Retrieve common part of document key.
@@ -43,12 +46,10 @@ pub enum BlockchainServiceTask<Origin> {
 
 /// Block API.
 pub trait Block: Send + Sync {
-	/// Task origin type.
-	type Origin: Send;
 	/// New blocks iterator.
-	type NewBlocksIterator: Iterator<Item = BlockchainServiceTask<Self::Origin>>;
+	type NewBlocksIterator: Iterator<Item = BlockchainServiceTask>;
 	/// Pending tasks iterator.
-	type PendingBlocksIterator: Iterator<Item = BlockchainServiceTask<Self::Origin>>;
+	type PendingBlocksIterator: Iterator<Item = BlockchainServiceTask>;
 
 	/// Get all new service tasks from this block.
 	fn new_tasks(&mut self) -> Self::NewBlocksIterator;
@@ -65,7 +66,7 @@ pub trait Executor: Send + Sync + 'static {
 }
 
 /// Transaction pool API.
-pub trait TransactionPool<Origin>: Send + Sync + 'static {
+pub trait TransactionPool: Send + Sync + 'static {
 	/// Publish generated server key.
 	fn publish_generated_server_key(
 		&self,
@@ -186,7 +187,7 @@ pub async fn start_service<B, E, TP, KS>(
 ) -> Result<(), Error> where
 	B: Block,
 	E: Executor,
-	TP: TransactionPool<B::Origin>,
+	TP: TransactionPool,
 	KS: KeyServer,
 {
 	let environment = Arc::new(Environment {
@@ -262,17 +263,16 @@ pub async fn start_service<B, E, TP, KS>(
 }
 
 /// Process multiple service tasks.
-fn process_tasks<E, TP, KS, Origin>(
+fn process_tasks<E, TP, KS>(
 	future_environment: &Arc<Environment<E, TP, KS>>,
 	future_service_data: &Arc<RwLock<ServiceData>>,
 	current_set: &BTreeSet<KeyServerId>,
-	new_tasks: impl Iterator<Item = BlockchainServiceTask<Origin>>,
+	new_tasks: impl Iterator<Item = BlockchainServiceTask>,
 	service_data: &mut ServiceData,
 ) -> usize where
 	E: Executor,
-	TP: TransactionPool<Origin>,
+	TP: TransactionPool,
 	KS: KeyServer,
-	Origin: Send,
 {
 	let mut added_tasks = 0;
 	for new_task in new_tasks {
@@ -295,15 +295,15 @@ fn process_tasks<E, TP, KS, Origin>(
 }
 
 /// Process single service task.
-fn process_task<E, TP, KS, Origin>(
+fn process_task<E, TP, KS>(
 	future_environment: &Arc<Environment<E, TP, KS>>,
 	future_service_data: &Arc<RwLock<ServiceData>>,
 	current_set: &BTreeSet<KeyServerId>,
-	task: BlockchainServiceTask<Origin>,
+	task: BlockchainServiceTask,
 	service_data: &mut ServiceData,
 ) -> Option<impl Future<Output = ()>> where
 	E: Executor,
-	TP: TransactionPool<Origin>,
+	TP: TransactionPool,
 	KS: KeyServer,
 {
 	match task {
@@ -327,7 +327,7 @@ fn process_task<E, TP, KS, Origin>(
 					.map(move |result| {
 						future_service_data.write().server_key_generation_sessions.remove(&key_id);
 
-						match result {
+						match result.result {
 							Ok(artifacts) => future_environment.transaction_pool.publish_generated_server_key(
 								origin,
 								key_id,
@@ -367,7 +367,7 @@ fn process_task<E, TP, KS, Origin>(
 					.map(move |result| {
 						future_service_data.write().server_key_retrieval_sessions.remove(&key_id);
 
-						match result {
+						match result.result {
 							Ok(artifacts) => future_environment.transaction_pool.publish_retrieved_server_key(
 								origin,
 								key_id,
@@ -406,11 +406,11 @@ fn process_task<E, TP, KS, Origin>(
 			Some(Either::Right(Either::Right(Either::Left(
 				future_environment
 					.key_server
-					.store_document_key(key_id, requester, common_point, encrypted_point)
+					.store_document_key(Some(origin), key_id, requester, common_point, encrypted_point)
 					.map(move |result| {
 						future_service_data.write().document_key_store_sessions.remove(&key_id);
 
-						match result {
+						match result.result {
 							Ok(_) => future_environment.transaction_pool.publish_stored_document_key(
 								origin,
 								key_id,
@@ -446,13 +446,13 @@ fn process_task<E, TP, KS, Origin>(
 			Some(Either::Right(Either::Right(Either::Right(Either::Left(
 				future_environment
 					.key_server
-					.restore_document_key_common(key_id, requester.clone())
+					.restore_document_key_common(Some(origin), key_id, requester.clone())
 					.map(move |result| {
 						future_service_data.write().document_key_common_retrieval_sessions.remove(
 							&(key_id, requester.clone()),
 						);
 
-						match result {
+						match result.result {
 							Ok(artifacts) => future_environment
 								.transaction_pool
 								.publish_retrieved_document_key_common(
@@ -499,13 +499,13 @@ fn process_task<E, TP, KS, Origin>(
 			Some(Either::Right(Either::Right(Either::Right(Either::Right(
 				future_environment
 					.key_server
-					.restore_document_key_shadow(key_id, requester.clone())
+					.restore_document_key_shadow(Some(origin), key_id, requester.clone())
 					.map(move |result| {
 						future_service_data.write().document_key_personal_retrieval_sessions.remove(
 							&(key_id, requester.clone()),
 						);
 
-						match result {
+						match result.result {
 							Ok(key_personal) => future_environment
 								.transaction_pool
 								.publish_retrieved_document_key_personal(
