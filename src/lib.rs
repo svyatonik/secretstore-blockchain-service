@@ -29,9 +29,11 @@ use parity_secretstore_primitives::{
 	key_server::{
 		Origin, KeyServer, ServerKeyGenerationArtifacts, ServerKeyRetrievalArtifacts,
 		DocumentKeyCommonRetrievalArtifacts, DocumentKeyShadowRetrievalArtifacts,
+		ServerKeyGenerationResult, ServerKeyRetrievalResult, DocumentKeyStoreResult,
+		DocumentKeyCommonRetrievalResult, DocumentKeyShadowRetrievalResult,
 	},
 	requester::Requester,
-	service::ServiceTask,
+	service::{ServiceTasksListenerRegistrar, ServiceTask},
 };
 
 /// Blockchain service tasks.
@@ -177,9 +179,16 @@ struct ServiceData {
 	pub recent_document_key_personal_retrieval_sessions: HashSet<(ServerKeyId, Requester)>,
 }
 
+/// Service tasks listener.
+struct ServiceTasksListener<E, TP, KS> {
+	/// Shared service data reference.
+	pub environment: Arc<Environment<E, TP, KS>>,
+}
+
 /// Start listening requests from given contract.
-pub async fn start_service<B, E, TP, KS>(
+pub async fn start_service<B, E, TP, KS, LR>(
 	key_server: Arc<KS>,
+	listener_registrar: Arc<LR>,
 	executor: Arc<E>,
 	transaction_pool: Arc<TP>,
 	config: Configuration,
@@ -189,6 +198,7 @@ pub async fn start_service<B, E, TP, KS>(
 	E: Executor,
 	TP: TransactionPool,
 	KS: KeyServer,
+	LR: ServiceTasksListenerRegistrar,
 {
 	let environment = Arc::new(Environment {
 		self_id: config.self_id,
@@ -208,6 +218,10 @@ pub async fn start_service<B, E, TP, KS>(
 		recent_document_key_common_retrieval_sessions: HashSet::new(),
 		document_key_personal_retrieval_sessions: HashSet::new(),
 		recent_document_key_personal_retrieval_sessions: HashSet::new(),
+	}));
+
+	listener_registrar.register_listener(Arc::new(ServiceTasksListener {
+		environment: environment.clone(),
 	}));
 
 	new_blocks_stream
@@ -323,27 +337,9 @@ fn process_task<E, TP, KS>(
 			Some(Either::Left(
 				future_environment
 					.key_server
-					.generate_key(key_id, requester, threshold)
-					.map(move |result| {
+					.generate_key(Some(origin), key_id, requester, threshold)
+					.map(move |_| {
 						future_service_data.write().server_key_generation_sessions.remove(&key_id);
-
-						match result.result {
-							Ok(artifacts) => future_environment.transaction_pool.publish_generated_server_key(
-								origin,
-								key_id,
-								artifacts,
-							),
-							Err(error) if error.is_non_fatal() => {
-								log_nonfatal_secret_store_error(&format!("GenerateServerKey({})", key_id), error);
-							},
-							Err(error) => {
-								log_fatal_secret_store_error(&format!("GenerateServerKey({})", key_id), error);
-								future_environment.transaction_pool.publish_server_key_generation_error(
-									origin,
-									key_id,
-								);
-							},
-						}
 					})
 			))
 		},
@@ -363,27 +359,9 @@ fn process_task<E, TP, KS>(
 			Some(Either::Right(Either::Left(
 				future_environment
 					.key_server
-					.restore_key_public(key_id, requester)
-					.map(move |result| {
+					.restore_key_public(Some(origin), key_id, requester)
+					.map(move |_| {
 						future_service_data.write().server_key_retrieval_sessions.remove(&key_id);
-
-						match result.result {
-							Ok(artifacts) => future_environment.transaction_pool.publish_retrieved_server_key(
-								origin,
-								key_id,
-								artifacts,
-							),
-							Err(error) if error.is_non_fatal() => {
-								log_nonfatal_secret_store_error(&format!("RetrieveServerKey({})", key_id), error);
-							},
-							Err(error) => {
-								log_fatal_secret_store_error(&format!("RetrieveServerKey({})", key_id), error);
-								future_environment.transaction_pool.publish_server_key_retrieval_error(
-									origin,
-									key_id,
-								);
-							},
-						}
 					})
 			)))
 		},
@@ -407,25 +385,8 @@ fn process_task<E, TP, KS>(
 				future_environment
 					.key_server
 					.store_document_key(Some(origin), key_id, requester, common_point, encrypted_point)
-					.map(move |result| {
+					.map(move |_| {
 						future_service_data.write().document_key_store_sessions.remove(&key_id);
-
-						match result.result {
-							Ok(_) => future_environment.transaction_pool.publish_stored_document_key(
-								origin,
-								key_id,
-							),
-							Err(error) if error.is_non_fatal() => {
-								log_nonfatal_secret_store_error(&format!("StoreDocumentKey({})", key_id), error);
-							},
-							Err(error) => {
-								log_fatal_secret_store_error(&format!("StoreDocumentKey({})", key_id), error);
-								future_environment.transaction_pool.publish_document_key_store_error(
-									origin,
-									key_id,
-								);
-							},
-						}
 					})
 			))))
 		},
@@ -447,38 +408,10 @@ fn process_task<E, TP, KS>(
 				future_environment
 					.key_server
 					.restore_document_key_common(Some(origin), key_id, requester.clone())
-					.map(move |result| {
+					.map(move |_| {
 						future_service_data.write().document_key_common_retrieval_sessions.remove(
 							&(key_id, requester.clone()),
 						);
-
-						match result.result {
-							Ok(artifacts) => future_environment
-								.transaction_pool
-								.publish_retrieved_document_key_common(
-									origin,
-									key_id,
-									requester,
-									artifacts,
-								),
-							Err(error) if error.is_non_fatal() => {
-								log_nonfatal_secret_store_error(
-									&format!("RestoreDocumentKeyCommon({}, {})", key_id, requester),
-									error,
-								);
-							},
-							Err(error) => {
-								log_fatal_secret_store_error(
-									&format!("RestoreDocumentKeyCommon({}, {})", key_id, requester),
-									error,
-								);
-								future_environment.transaction_pool.publish_document_key_common_retrieval_error(
-									origin,
-									key_id,
-									requester,
-								);
-							}
-						}
 					})
 			)))))
 		},
@@ -500,40 +433,10 @@ fn process_task<E, TP, KS>(
 				future_environment
 					.key_server
 					.restore_document_key_shadow(Some(origin), key_id, requester.clone())
-					.map(move |result| {
+					.map(move |_| {
 						future_service_data.write().document_key_personal_retrieval_sessions.remove(
 							&(key_id, requester.clone()),
 						);
-
-						match result.result {
-							Ok(key_personal) => future_environment
-								.transaction_pool
-								.publish_retrieved_document_key_personal(
-									origin,
-									key_id,
-									requester,
-									key_personal,
-								),
-							Err(error) if error.is_non_fatal() => {
-								log_nonfatal_secret_store_error(
-									&format!("RestoreDocumentKeyPersonal({}, {})", key_id, requester),
-									error,
-								);
-							},
-							Err(error) => {
-								log_fatal_secret_store_error(
-									&format!("RestoreDocumentKeyPersonal({}, {})", key_id, requester),
-									error,
-								);
-								future_environment
-									.transaction_pool
-									.publish_document_key_personal_retrieval_error(
-										origin,
-										key_id,
-										requester,
-									);
-							}
-						}
 					})
 			)))))
 		},
@@ -661,5 +564,167 @@ impl ServiceData {
 			+ self.document_key_store_sessions.len()
 			+ self.document_key_common_retrieval_sessions.len()
 			+ self.document_key_personal_retrieval_sessions.len()
+	}
+}
+
+// TODO: we are not checking that session Origin omes from our service
+// => if several services are active, we may submit transaction of
+// another service. So origin must be service_id + current origin
+
+impl<E, TP, KS>
+	parity_secretstore_primitives::service::ServiceTasksListener
+for
+	ServiceTasksListener<E, TP, KS>
+where
+	E: Executor,
+	TP: TransactionPool,
+	KS: KeyServer,
+{
+	fn server_key_generated(&self, result: ServerKeyGenerationResult) {
+		if let Some(origin) = result.origin {
+			match result.result {
+				Ok(artifacts) => self.environment.transaction_pool.publish_generated_server_key(
+					origin,
+					result.params.key_id,
+					artifacts,
+				),
+				Err(error) if error.is_non_fatal() => log_nonfatal_secret_store_error(
+					&format!("GenerateServerKey({})", result.params.key_id),
+					error,
+				),
+				Err(error) => {
+					log_fatal_secret_store_error(&format!("GenerateServerKey({})", result.params.key_id), error);
+					self.environment.transaction_pool.publish_server_key_generation_error(
+						origin,
+						result.params.key_id,
+					);
+				},
+			}
+		}
+	}
+
+	fn server_key_retrieved(&self, result: ServerKeyRetrievalResult) {
+		if let Some(origin) = result.origin {
+			match result.result {
+				Ok(artifacts) => self.environment.transaction_pool.publish_retrieved_server_key(
+					origin,
+					result.params.key_id,
+					artifacts.clone(),
+				),
+				Err(error) if error.is_non_fatal() => {
+					log_nonfatal_secret_store_error(&format!("RetrieveServerKey({})", result.params.key_id), error);
+				},
+				Err(error) => {
+					log_fatal_secret_store_error(&format!("RetrieveServerKey({})", result.params.key_id), error);
+					self.environment.transaction_pool.publish_server_key_retrieval_error(
+						origin,
+						result.params.key_id,
+					);
+				},
+			}
+		}
+	}
+
+	fn document_key_stored(&self, result: DocumentKeyStoreResult) {
+		if let Some(origin) = result.origin {
+			match result.result {
+				Ok(_) => self.environment.transaction_pool.publish_stored_document_key(
+					origin,
+					result.params.key_id,
+				),
+				Err(error) if error.is_non_fatal() => {
+					log_nonfatal_secret_store_error(&format!("StoreDocumentKey({})", result.params.key_id), error);
+				},
+				Err(error) => {
+					log_fatal_secret_store_error(&format!("StoreDocumentKey({})", result.params.key_id), error);
+					self.environment.transaction_pool.publish_document_key_store_error(
+						origin,
+						result.params.key_id,
+					);
+				},
+			}
+		}
+	}
+
+	fn document_key_common_retrieved(&self, result: DocumentKeyCommonRetrievalResult) {
+		if let Some(origin) = result.origin {
+			match result.result {
+				Ok(artifacts) => self.environment
+					.transaction_pool
+					.publish_retrieved_document_key_common(
+						origin,
+						result.params.key_id,
+						result.params.requester,
+						artifacts,
+					),
+				Err(error) if error.is_non_fatal() => {
+					log_nonfatal_secret_store_error(
+						&format!(
+							"RestoreDocumentKeyCommon({}, {})",
+							result.params.key_id,
+							result.params.requester,
+						),
+						error,
+					);
+				},
+				Err(error) => {
+					log_fatal_secret_store_error(
+						&format!(
+							"RestoreDocumentKeyCommon({}, {})",
+							result.params.key_id,
+							result.params.requester,
+						),
+						error,
+					);
+					self.environment.transaction_pool.publish_document_key_common_retrieval_error(
+						origin,
+						result.params.key_id,
+						result.params.requester,
+					);
+				}
+			}
+		}
+	}
+
+	fn document_key_shadow_retrieved(&self, result: DocumentKeyShadowRetrievalResult) {
+		if let Some(origin) = result.origin {
+			match result.result {
+				Ok(key_personal) => self.environment
+					.transaction_pool
+					.publish_retrieved_document_key_personal(
+						origin,
+						result.params.key_id,
+						result.params.requester,
+						key_personal,
+					),
+				Err(error) if error.is_non_fatal() => {
+					log_nonfatal_secret_store_error(
+						&format!(
+							"RestoreDocumentKeyPersonal({}, {})",
+							result.params.key_id,
+							result.params.requester,
+						),
+						error,
+					);
+				},
+				Err(error) => {
+					log_fatal_secret_store_error(
+						&format!(
+							"RestoreDocumentKeyPersonal({}, {})",
+							result.params.key_id,
+							result.params.requester,
+						),
+						error,
+					);
+					self.environment
+						.transaction_pool
+						.publish_document_key_personal_retrieval_error(
+							origin,
+							result.params.key_id,
+							result.params.requester,
+						);
+				}
+			}
+		}
 	}
 }
