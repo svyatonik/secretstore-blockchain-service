@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use futures::{future::{ready, BoxFuture, Either}, FutureExt, Stream, StreamExt};
+use futures::{future::{ready, Either}, FutureExt, Stream, StreamExt};
 use log::{error, warn};
 use parking_lot::RwLock;
 use ethereum_types::{U256, BigEndianHash};
@@ -26,6 +26,7 @@ use ethereum_types::{U256, BigEndianHash};
 use parity_secretstore_primitives::{
 	KeyServerId, ServerKeyId,
 	error::Error,
+	executor::Executor,
 	key_server::{
 		Origin, KeyServer, ServerKeyGenerationArtifacts, ServerKeyRetrievalArtifacts,
 		DocumentKeyCommonRetrievalArtifacts, DocumentKeyShadowRetrievalArtifacts,
@@ -59,12 +60,6 @@ pub trait Block: Send + Sync {
 	fn pending_tasks(&mut self) -> Self::PendingBlocksIterator;
 	/// Returns current key server set at this block.
 	fn current_key_servers_set(&mut self) -> BTreeSet<KeyServerId>;
-}
-
-/// Futures executor.
-pub trait Executor: Send + Sync + 'static {
-	/// Spawn future and run to completion.
-	fn spawn(&self, future: BoxFuture<()>);
 }
 
 /// Transaction pool API.
