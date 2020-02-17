@@ -180,9 +180,9 @@ struct ServiceTasksListener<E, TP, KS> {
 }
 
 /// Start listening requests from given contract.
-pub async fn start_service<B, E, TP, KS, LR>(
+pub async fn start_service<B, E, TP, KS>(
 	key_server: Arc<KS>,
-	listener_registrar: Arc<LR>,
+	listener_registrar: Arc<dyn ServiceTasksListenerRegistrar>,
 	executor: Arc<E>,
 	transaction_pool: Arc<TP>,
 	config: Configuration,
@@ -192,7 +192,6 @@ pub async fn start_service<B, E, TP, KS, LR>(
 	E: Executor,
 	TP: TransactionPool,
 	KS: KeyServer,
-	LR: ServiceTasksListenerRegistrar,
 {
 	let environment = Arc::new(Environment {
 		self_id: config.self_id,
